@@ -1,0 +1,230 @@
+// Breakout-based trend indicator that enters when price breaks user-defined highs or lows,
+// adds positions as the trend continues, and uses ATR for stops.
+// © Timo Anttila, Tuspe Design Oy
+
+//@version=6
+indicator("Turtle Strategy [timoanttila]", shorttitle="Turtle", overlay=true, max_labels_count=200)
+
+// Inputs
+group1 = "Numbers of bars for Longs"
+entry_bull_bars = input.int(20, "Entry Long", group=group1)
+entry_bear_bars = input.int(20, "Entry Short", group=group1)
+exit_bear_bars = input.int(10, "Exit", group=group1)
+
+group2 = "Average True Range"
+atr_length = input.int(20, "ATR length", group=group2)
+atr_add_m = input.float(1, "ATR add multiplier", group=group2)
+atr_exit_m = input.float(2, "ATR exit multiplier", group=group2)
+
+group3 = "Moving Averages"
+ma1_length = input.int(20, "SMA Short Length", maxval=50, minval=5, group=group3)
+ma1 = ta.sma(close, ma1_length)
+plot(ma1, color=color.yellow, linewidth=2, title="SMA Short")
+
+ma2_length = input.int(200, "SMA Long Length", maxval=300, minval=20, group=group3)
+ma2 = ta.sma(close, ma2_length)
+plot(ma2, color=color.white, linewidth=2, title="SMA Long")
+
+group4 = "Relative Strength Index"
+rsi_period = input.int(14, "RSI Period", minval=5, group=group4)
+rsi_max = input.float(80, "RSI Overbought", minval=50, maxval=90, group=group4)
+rsi_min = input.float(20, "RSI Oversold", minval=10, maxval=50, group=group4)
+
+group5 = "Entry Settings"
+entry_max = input.int(2, "Max entries per trend", group=group5)
+min_body_perc = input.float(40, "Min entry candle body %", minval=20, maxval=95, group=group5)
+only_longs = input.bool(false, "Only Longs", group=group5)
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+float atr_val = ta.atr(atr_length)
+float entry_highest = ta.highest(high, entry_bull_bars)[1]
+float entry_lowest = ta.lowest(low, entry_bear_bars)[1]
+float exit_highest = ta.highest(high, exit_bear_bars)[1]
+float exit_lowest = ta.lowest(low, exit_bear_bars)[1]
+float rsi = ta.rsi(close, rsi_period)
+int entry = na
+int exit = na
+var float atr_exit = na
+var float entry_clear = na
+var int entry_taken  = 0
+var int trend = 0
+
+// ----------
+//  EXIT / ATR FIX
+// ----------
+
+if entry_taken > 0
+    if trend == 1 and (close < exit_lowest or close < atr_exit)
+        exit := 1
+
+    else if trend == 2 and (close > exit_highest or close > atr_exit)
+        exit := 2
+
+    if exit > 0
+        entry_taken := 0
+
+// ----------
+//  CROSS
+// ----------
+
+bool cross_bear = ta.crossunder(close, ma1)
+bool cross_bull = ta.crossover(close, ma1)
+
+if cross_bull or cross_bear
+    if entry_taken > 0
+        exit := trend
+
+    entry_taken := 0
+    entry_clear := na
+    trend := cross_bull ? 1 : 2
+
+// ----------
+//  ENTRY
+// ----------
+
+if entry_max > entry_taken and rsi > rsi_min and rsi < rsi_max
+    float body_size = math.abs(close - open)
+    float candle_size = math.abs(high - low)
+    bool body_ok = body_size / candle_size >= min_body_perc / 100 and body_size > atr_val * 0.5 and candle_size < atr_val * 4
+
+    bool structure_ok = trend == 1 ? is_bull and close > high[1] : is_bear and low < low[1]
+    bool candle_valid = body_ok and structure_ok
+
+    if candle_valid
+        float atr_entry = na
+        if not na(entry_clear)
+            float atr_add = atr_val * atr_add_m
+            atr_entry := trend == 1 ? entry_clear + atr_add : entry_clear - atr_add
+
+        float noise_filter = atr_val * 0.1
+        float atr_sl_size = atr_exit_m * atr_val
+
+        bool bear_trend = false
+        bool bull_trend = false
+
+        if trend == 1 and is_bull and close > entry_highest + noise_filter and (na(entry_clear) or close > atr_entry)
+            atr_exit := close - atr_sl_size
+            bull_trend := true
+            entry := 1
+            entry_clear := high
+
+        else if trend == 2 and not only_longs and is_bear and close < entry_lowest - noise_filter and (na(entry_clear) or close < atr_entry)
+            atr_exit := close + atr_sl_size
+            bear_trend := true
+            entry := 2
+            entry_clear := low
+
+        if bear_trend or bull_trend
+            entry_taken := entry_taken + 1
+
+            if not na(exit)
+                exit := na
+
+// ----------
+//  VISUAL
+// ----------
+
+plot_size = size.tiny
+plot_color = color.new(color.white, 20)
+plot_bull = location.belowbar
+plot_bear = location.abovebar
+
+plotshape(entry == 1 and entry_taken == 1, title="Long Entry", style=shape.triangleup, location=plot_bull, color=plot_color, size=plot_size)
+plotshape(entry == 2 and entry_taken == 1, title="Short Entry", style=shape.triangledown, location=plot_bear, color=plot_color, size=plot_size)
+
+plot_style = shape.cross
+
+plotshape(entry == 1 and entry_taken > 1, title="Long Add", style=plot_style, location=plot_bull, color=plot_color, size=plot_size)
+plotshape(entry == 2 and entry_taken > 1, title="Short Add", style=plot_style, location=plot_bear, color=plot_color, size=plot_size)
+
+plot_style := shape.xcross
+plot_color := color.new(color.gray, 20)
+
+plotshape(exit == 1, title="Long Exit", style=plot_style, location=plot_bull, color=plot_color, size=plot_size)
+plotshape(exit == 2, title="Short Exit", style=plot_style, location=plot_bear, color=plot_color, size=plot_size)
+
+// ----------
+//  ALERTS
+// ----------
+
+alertcondition(entry > 0, title="All entries", message="New signal found. Check where next candle is going before entering. Happy trading!")
+alertcondition(entry > 0 and entry_taken == 1, title="New Trend", message="New trend found. Happy trading!")
+alertcondition(entry > 0 and entry_taken > 1, title="Add More", message="It might be good time to add to your winner. Happy trading!")
+
+// ----------
+//  BROKER / EXCHANGE DAILY CANDLES
+// ----------
+
+bool isLTF = timeframe.in_seconds() <= 7200
+pdh = request.security(syminfo.tickerid, "D", high[1])
+pdl = request.security(syminfo.tickerid, "D", low[1])
+todayOpen = request.security(syminfo.tickerid, "D", open)
+dayStart = request.security(syminfo.tickerid, "D", time)
+newDay = ta.change(dayStart) != 0 and isLTF
+futureTime = time + 5 * (time - time[1])
+
+// ----------
+//  DRAW ON DAILY SESSION START
+// ----------
+
+var line pdhLine = na
+var line pdlLine = na
+var line openLine = na
+
+var label pdhLabel = na
+var label pdlLabel = na
+var label openLabel = na
+
+if newDay
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    line.delete(openLine)
+
+    label.delete(pdhLabel)
+    label.delete(pdlLabel)
+    label.delete(openLabel)
+
+    // Previous Day High
+    pdhLine := line.new(dayStart, pdh, futureTime, pdh,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = color.red,
+        style = line.style_dashed)
+
+    // Previous Day Low
+    pdlLine := line.new(dayStart, pdl, futureTime, pdl,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = color.green,
+        style = line.style_dashed)
+
+    // Today Open
+    openLine := line.new(dayStart, todayOpen, futureTime, todayOpen,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = color.blue,
+        width = 2)
+
+    // Labels (right side, transparent)
+    pdhLabel := label.new(futureTime, pdh, "PDH",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.red,
+        color = color.new(color.red, 100))
+
+    pdlLabel := label.new(futureTime, pdl, "PDL",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.green,
+        color = color.new(color.green, 100))
+
+    openLabel := label.new(futureTime, todayOpen, "OPEN",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.blue,
+        color = color.new(color.blue, 100))

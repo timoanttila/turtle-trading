@@ -1,0 +1,508 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using cAlgo.API;
+using cAlgo.API.Internals;
+using cAlgo.API.Indicators;
+using cAlgo.Indicators;
+
+[Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+public class TurtleTradingStrategy : Robot
+{
+    [Parameter("Entry Period", DefaultValue = 20, MinValue = 5, MaxValue = 100)]
+    public int EntryPeriod { get; set; }
+
+    [Parameter("Exit Period", DefaultValue = 10, MinValue = 5, MaxValue = 50)]
+    public int ExitPeriod { get; set; }
+
+    [Parameter("ATR Period", DefaultValue = 20, MinValue = 5, MaxValue = 50)]
+    public int AtrPeriod { get; set; }
+
+    [Parameter("ATR Additions", DefaultValue = 1, MinValue = 0.5, MaxValue = 5.0)]
+    public double AtrAdd { get; set; }
+
+    [Parameter("ATR SL Multiplier", DefaultValue = 2, MinValue = 1.0, MaxValue = 5.0)]
+    public double AtrSL { get; set; }
+
+    [Parameter("Lot Size", DefaultValue = 0.1, MinValue = 0.01, MaxValue = 10.0)]
+    public double LotSize { get; set; }
+
+    [Parameter("Max Entries", DefaultValue = 3, MinValue = 1, MaxValue = 10)]
+    public int MaxEntries { get; set; }
+
+    [Parameter("Enable Long Trades", DefaultValue = true)]
+    public bool EnableLongTrades { get; set; }
+
+    [Parameter("Enable Short Trades", DefaultValue = true)]
+    public bool EnableShortTrades { get; set; }
+
+    [Parameter("Min Body Percentage", DefaultValue = 60, MinValue = 0, MaxValue = 100)]
+    public double MinBodyPercentage { get; set; }
+
+    private AverageTrueRange atr;
+    private List<Position> longPositions = new List<Position>();
+    private List<Position> shortPositions = new List<Position>();
+
+    private double prevHigh;
+    private double prevLow;
+    private double exitHigh;
+    private double exitLow;
+
+    private double lastLongEntryPrice;
+    private double lastShortEntryPrice;
+
+    // Track BOTH stop loss levels separately
+    private double longAtrStopLoss;
+    private double longExitStopLoss;
+    private double shortAtrStopLoss;
+    private double shortExitStopLoss;
+
+    protected override void OnStart()
+    {
+        atr = Indicators.AverageTrueRange(AtrPeriod, MovingAverageType.Exponential);
+        Bars.BarOpened += OnBarOpened;
+        Print("Turtle Trading Strategy Started");
+        Print($"Parameters - Entry: {EntryPeriod}, Exit: {ExitPeriod}, ATR Period: {AtrPeriod}");
+        Print($"ATR SL: {AtrSL}x, ATR Add: {AtrAdd}x, Min Body%: {MinBodyPercentage}%");
+    }
+
+    private void OnBarOpened(BarOpenedEventArgs obj)
+    {
+        // Process once per bar on bar close (when new bar opens)
+        UpdateCurrentPositions();
+        UpdateBreakoutLevels();
+        CheckEntrySignals();        // Check entries FIRST
+        UpdateStopLossLevels();     // THEN update SL levels
+    }
+
+    protected override void OnTick()
+    {
+        UpdateCurrentPositions();
+        // Check exits on every tick using the stop loss levels calculated on bar close
+        CheckExits();
+    }
+
+    private void UpdateCurrentPositions()
+    {
+        longPositions.Clear();
+        shortPositions.Clear();
+
+        foreach (var position in Positions)
+        {
+            if (position.SymbolName == SymbolName)
+            {
+                if (position.Label.StartsWith("TurtleLong"))
+                    longPositions.Add(position);
+                else if (position.Label.StartsWith("TurtleShort"))
+                    shortPositions.Add(position);
+            }
+        }
+
+        longPositions = longPositions.OrderBy(p => p.EntryTime).ToList();
+        shortPositions = shortPositions.OrderBy(p => p.EntryTime).ToList();
+    }
+
+    private void UpdateBreakoutLevels()
+    {
+        if (Bars.Count < Math.Max(EntryPeriod, ExitPeriod) + 2)
+            return;
+
+        // Look at bars BEFORE the last closed bar (shift=2 means bars 2 to EntryPeriod+1)
+        // This way we're comparing the last closed bar against the PREVIOUS period
+        prevHigh = GetHighestHigh(EntryPeriod, 2);
+        prevLow = GetLowestLow(EntryPeriod, 2);
+        exitLow = GetLowestLow(ExitPeriod, 2);
+        exitHigh = GetHighestHigh(ExitPeriod, 2);
+    }
+
+    private double GetHighestHigh(int period, int shift)
+    {
+        double highest = double.MinValue;
+        for (int i = shift; i < period + shift; i++)
+        {
+            if (Bars.Count > i && Bars.HighPrices.Last(i) > highest)
+                highest = Bars.HighPrices.Last(i);
+        }
+        return highest;
+    }
+
+    private double GetLowestLow(int period, int shift)
+    {
+        double lowest = double.MaxValue;
+        for (int i = shift; i < period + shift; i++)
+        {
+            if (Bars.Count > i && Bars.LowPrices.Last(i) < lowest)
+                lowest = Bars.LowPrices.Last(i);
+        }
+        return lowest;
+    }
+
+    private bool IsStrongCandle(int barsAgo = 1)
+    {
+        if (Bars.Count < barsAgo + 1)
+            return false;
+
+        double open = Bars.OpenPrices.Last(barsAgo);
+        double close = Bars.ClosePrices.Last(barsAgo);
+        double high = Bars.HighPrices.Last(barsAgo);
+        double low = Bars.LowPrices.Last(barsAgo);
+
+        double candleRange = high - low;
+        if (candleRange == 0)
+            return false;
+
+        double bodySize = Math.Abs(close - open);
+        double bodyPercentage = (bodySize / candleRange) * 100;
+
+        return bodyPercentage >= MinBodyPercentage;
+    }
+
+    private bool IsBullishCandle(int barsAgo = 1)
+    {
+        if (Bars.Count < barsAgo + 1)
+            return false;
+
+        double open = Bars.OpenPrices.Last(barsAgo);
+        double close = Bars.ClosePrices.Last(barsAgo);
+
+        return close > open;
+    }
+
+    private bool IsBearishCandle(int barsAgo = 1)
+    {
+        if (Bars.Count < barsAgo + 1)
+            return false;
+
+        double open = Bars.OpenPrices.Last(barsAgo);
+        double close = Bars.ClosePrices.Last(barsAgo);
+
+        return close < open;
+    }
+
+    private void UpdateStopLossLevels()
+    {
+        // Only update SL levels if we have active positions
+        if (longPositions.Count == 0 && shortPositions.Count == 0)
+            return;
+
+        if (Bars.Count < 2)
+            return;
+
+        double atrValue = atr.Result.Last(1); // ATR from last completed bar
+        double lastClose = Bars.ClosePrices.Last(1); // Last completed bar close
+
+        // Update long stop loss levels (only move up, never down)
+        if (longPositions.Count > 0)
+        {
+            // Update ATR-based SL
+            double newAtrSL = lastClose - (atrValue * AtrSL);
+            if (longAtrStopLoss > 0 && newAtrSL > longAtrStopLoss)
+            {
+                double oldSL = longAtrStopLoss;
+                longAtrStopLoss = newAtrSL;
+                Print($"Long ATR SL updated: {oldSL:F5} → {longAtrStopLoss:F5}");
+            }
+
+            // Update Exit-based SL (can move both ways as market moves)
+            double newExitSL = exitLow;
+            if (newExitSL != longExitStopLoss)
+            {
+                double oldSL = longExitStopLoss;
+                longExitStopLoss = newExitSL;
+                Print($"Long Exit SL updated: {oldSL:F5} → {longExitStopLoss:F5} ({ExitPeriod}D Low)");
+            }
+        }
+
+        // Update short stop loss levels (only move down, never up)
+        if (shortPositions.Count > 0)
+        {
+            // Update ATR-based SL
+            double newAtrSL = lastClose + (atrValue * AtrSL);
+            if (shortAtrStopLoss > 0 && newAtrSL < shortAtrStopLoss)
+            {
+                double oldSL = shortAtrStopLoss;
+                shortAtrStopLoss = newAtrSL;
+                Print($"Short ATR SL updated: {oldSL:F5} → {shortAtrStopLoss:F5}");
+            }
+
+            // Update Exit-based SL (can move both ways as market moves)
+            double newExitSL = exitHigh;
+            if (newExitSL != shortExitStopLoss)
+            {
+                double oldSL = shortExitStopLoss;
+                shortExitStopLoss = newExitSL;
+                Print($"Short Exit SL updated: {oldSL:F5} → {shortExitStopLoss:F5} ({ExitPeriod}D High)");
+            }
+        }
+    }
+
+    private void CheckExits()
+    {
+        CheckLongExits();
+        CheckShortExits();
+    }
+
+    private void CheckLongExits()
+    {
+        if (longPositions.Count == 0 || (longAtrStopLoss == 0 && longExitStopLoss == 0))
+            return;
+
+        double currentPrice = Symbol.Bid;
+
+        // Exit if current price falls below EITHER stop loss level
+        bool hitAtrSL = longAtrStopLoss > 0 && currentPrice <= longAtrStopLoss;
+        bool hitExitSL = longExitStopLoss > 0 && currentPrice <= longExitStopLoss;
+
+        if (hitAtrSL || hitExitSL)
+        {
+            double totalProfit = 0;
+            int positionCount = longPositions.Count;
+
+            foreach (var position in longPositions.ToList())
+            {
+                totalProfit += position.NetProfit;
+                ClosePosition(position);
+            }
+
+            string exitReason = hitAtrSL ? $"ATR SL {longAtrStopLoss:F5}" : $"Exit SL {longExitStopLoss:F5}";
+            Print($"=== ALL {positionCount} LONG POSITIONS CLOSED ===");
+            Print($"Exit: Price {currentPrice:F5} <= {exitReason}");
+            Print($"Total P&L: {totalProfit:F2} {Account.Asset.Name}");
+
+            // Reset all long tracking variables
+            lastLongEntryPrice = 0;
+            longAtrStopLoss = 0;
+            longExitStopLoss = 0;
+        }
+    }
+
+    private void CheckShortExits()
+    {
+        if (shortPositions.Count == 0 || (shortAtrStopLoss == 0 && shortExitStopLoss == 0))
+            return;
+
+        double currentPrice = Symbol.Ask;
+
+        // Exit if current price rises above EITHER stop loss level
+        bool hitAtrSL = shortAtrStopLoss > 0 && currentPrice >= shortAtrStopLoss;
+        bool hitExitSL = shortExitStopLoss > 0 && currentPrice >= shortExitStopLoss;
+
+        if (hitAtrSL || hitExitSL)
+        {
+            double totalProfit = 0;
+            int positionCount = shortPositions.Count;
+
+            foreach (var position in shortPositions.ToList())
+            {
+                totalProfit += position.NetProfit;
+                ClosePosition(position);
+            }
+
+            string exitReason = hitAtrSL ? $"ATR SL {shortAtrStopLoss:F5}" : $"Exit SL {shortExitStopLoss:F5}";
+            Print($"=== ALL {positionCount} SHORT POSITIONS CLOSED ===");
+            Print($"Exit: Price {currentPrice:F5} >= {exitReason}");
+            Print($"Total P&L: {totalProfit:F2} {Account.Asset.Name}");
+
+            // Reset all short tracking variables
+            lastShortEntryPrice = 0;
+            shortAtrStopLoss = 0;
+            shortExitStopLoss = 0;
+        }
+    }
+
+    private void CheckEntrySignals()
+    {
+        if (Bars.Count < EntryPeriod + 2)
+            return;
+
+        // Use LAST CLOSED candle (index 1) for all entry decisions
+        double lastClose = Bars.ClosePrices.Last(1);
+        double atrValue = atr.Result.Last(1);
+
+        // Check for LONG entries
+        if (EnableLongTrades && longPositions.Count < MaxEntries)
+        {
+            bool breakoutCondition = lastClose > prevHigh;
+            bool strongCandle = IsStrongCandle(1);
+            bool bullishCandle = IsBullishCandle(1);
+
+            // Debug logging when we're close to a breakout
+            if (breakoutCondition || (prevHigh > 0 && Math.Abs(lastClose - prevHigh) / prevHigh < 0.001))
+            {
+                Print($"LONG Check: Close={lastClose:F5}, PrevHigh={prevHigh:F5}, Breakout={breakoutCondition}, Strong={strongCandle}, Bullish={bullishCandle}");
+                if (!strongCandle)
+                {
+                    double open = Bars.OpenPrices.Last(1);
+                    double close = Bars.ClosePrices.Last(1);
+                    double high = Bars.HighPrices.Last(1);
+                    double low = Bars.LowPrices.Last(1);
+                    double bodyPct = (Math.Abs(close - open) / (high - low)) * 100;
+                    Print($"  Candle rejected: Body={bodyPct:F1}% (need {MinBodyPercentage}%), Range={high - low:F5}");
+                }
+            }
+
+            if (breakoutCondition && strongCandle && bullishCandle)
+            {
+                // Check if price is high enough for additional entry (or if it's first entry)
+                bool priceRequirementMet = false;
+
+                if (longPositions.Count == 0)
+                {
+                    // First entry - no price requirement beyond breakout
+                    priceRequirementMet = true;
+                }
+                else
+                {
+                    // Additional entries - must be AtrAdd * ATR above last entry
+                    double requiredPrice = lastLongEntryPrice + (atrValue * AtrAdd);
+                    priceRequirementMet = lastClose >= requiredPrice;
+
+                    if (!priceRequirementMet)
+                    {
+                        Print($"Long add skipped: Close {lastClose:F5} < Required {requiredPrice:F5} (+{AtrAdd}*ATR from last entry)");
+                    }
+                }
+
+                if (priceRequirementMet)
+                {
+                    ExecuteLongEntry(longPositions.Count + 1, lastClose, atrValue);
+                }
+            }
+        }
+
+        // Check for SHORT entries
+        if (EnableShortTrades && shortPositions.Count < MaxEntries)
+        {
+            bool breakoutCondition = lastClose < prevLow;
+            bool strongCandle = IsStrongCandle(1);
+            bool bearishCandle = IsBearishCandle(1);
+
+            // Debug logging when we're close to a breakout
+            if (breakoutCondition || (prevLow > 0 && Math.Abs(lastClose - prevLow) / prevLow < 0.001))
+            {
+                Print($"SHORT Check: Close={lastClose:F5}, PrevLow={prevLow:F5}, Breakout={breakoutCondition}, Strong={strongCandle}, Bearish={bearishCandle}");
+                if (!strongCandle)
+                {
+                    double open = Bars.OpenPrices.Last(1);
+                    double close = Bars.ClosePrices.Last(1);
+                    double high = Bars.HighPrices.Last(1);
+                    double low = Bars.LowPrices.Last(1);
+                    double bodyPct = (Math.Abs(close - open) / (high - low)) * 100;
+                    Print($"  Candle rejected: Body={bodyPct:F1}% (need {MinBodyPercentage}%), Range={high - low:F5}");
+                }
+            }
+
+            if (breakoutCondition && strongCandle && bearishCandle)
+            {
+                // Check if price is low enough for additional entry (or if it's first entry)
+                bool priceRequirementMet = false;
+
+                if (shortPositions.Count == 0)
+                {
+                    // First entry - no price requirement beyond breakout
+                    priceRequirementMet = true;
+                }
+                else
+                {
+                    // Additional entries - must be AtrAdd * ATR below last entry
+                    double requiredPrice = lastShortEntryPrice - (atrValue * AtrAdd);
+                    priceRequirementMet = lastClose <= requiredPrice;
+
+                    if (!priceRequirementMet)
+                    {
+                        Print($"Short add skipped: Close {lastClose:F5} > Required {requiredPrice:F5} (-{AtrAdd}*ATR from last entry)");
+                    }
+                }
+
+                if (priceRequirementMet)
+                {
+                    ExecuteShortEntry(shortPositions.Count + 1, lastClose, atrValue);
+                }
+            }
+        }
+    }
+
+    private void ExecuteLongEntry(int entryNumber, double triggerClose, double atrValue)
+    {
+        double positionSize = Symbol.QuantityToVolumeInUnits(LotSize);
+
+        string label = $"TurtleLong_{entryNumber}_{DateTime.Now.Ticks}";
+        var result = ExecuteMarketOrder(TradeType.Buy, SymbolName, positionSize, label, null, null);
+
+        if (result.IsSuccessful)
+        {
+            // Store the close price that triggered this entry
+            lastLongEntryPrice = triggerClose;
+
+            // Only set initial SL levels on FIRST entry
+            // After that, UpdateStopLossLevels() handles all updates
+            if (entryNumber == 1)
+            {
+                longAtrStopLoss = triggerClose - (atrValue * AtrSL);
+                longExitStopLoss = exitLow;
+
+                Print($"=== LONG ENTRY #{entryNumber} ===");
+                Print($"Fill: {result.Position.EntryPrice:F5} | Trigger close: {triggerClose:F5}");
+                Print($"Initial ATR SL: {longAtrStopLoss:F5} ({AtrSL}x ATR)");
+                Print($"Initial Exit SL: {longExitStopLoss:F5} ({ExitPeriod}D Low)");
+                Print($"Breakout: {triggerClose:F5} > {EntryPeriod}D High {prevHigh:F5}");
+            }
+            else
+            {
+                Print($"=== LONG ADDITION #{entryNumber} ===");
+                Print($"Fill: {result.Position.EntryPrice:F5} | Trigger close: {triggerClose:F5}");
+                Print($"Entry was {triggerClose - (lastLongEntryPrice - (atrValue * AtrAdd)):F5} above required level");
+                Print($"SL levels will be updated by UpdateStopLossLevels()");
+            }
+        }
+        else
+        {
+            Print($"ERROR: Failed to open long entry #{entryNumber}: {result.Error}");
+        }
+    }
+
+    private void ExecuteShortEntry(int entryNumber, double triggerClose, double atrValue)
+    {
+        double positionSize = Symbol.QuantityToVolumeInUnits(LotSize);
+
+        string label = $"TurtleShort_{entryNumber}_{DateTime.Now.Ticks}";
+        var result = ExecuteMarketOrder(TradeType.Sell, SymbolName, positionSize, label, null, null);
+
+        if (result.IsSuccessful)
+        {
+            // Store the close price that triggered this entry
+            lastShortEntryPrice = triggerClose;
+
+            // Only set initial SL levels on FIRST entry
+            // After that, UpdateStopLossLevels() handles all updates
+            if (entryNumber == 1)
+            {
+                shortAtrStopLoss = triggerClose + (atrValue * AtrSL);
+                shortExitStopLoss = exitHigh;
+
+                Print($"=== SHORT ENTRY #{entryNumber} ===");
+                Print($"Fill: {result.Position.EntryPrice:F5} | Trigger close: {triggerClose:F5}");
+                Print($"Initial ATR SL: {shortAtrStopLoss:F5} ({AtrSL}x ATR)");
+                Print($"Initial Exit SL: {shortExitStopLoss:F5} ({ExitPeriod}D High)");
+                Print($"Breakout: {triggerClose:F5} < {EntryPeriod}D Low {prevLow:F5}");
+            }
+            else
+            {
+                Print($"=== SHORT ADDITION #{entryNumber} ===");
+                Print($"Fill: {result.Position.EntryPrice:F5} | Trigger close: {triggerClose:F5}");
+                Print($"Entry was {(lastShortEntryPrice + (atrValue * AtrAdd)) - triggerClose:F5} below required level");
+                Print($"SL levels will be updated by UpdateStopLossLevels()");
+            }
+        }
+        else
+        {
+            Print($"ERROR: Failed to open short entry #{entryNumber}: {result.Error}");
+        }
+    }
+
+    protected override void OnStop()
+    {
+        Bars.BarOpened -= OnBarOpened;
+        Print("Turtle Trading Strategy Stopped");
+    }
+}
