@@ -1,0 +1,225 @@
+//@version=6
+indicator("Daddy's Special Mix", shorttitle="SM", overlay=true, dynamic_requests=true)
+
+// ----------
+//  Moving Averages
+// ----------
+
+group1 = "Moving Averages"
+
+ma1_length = input.int(9, title="Short Length", minval=5, group=group1)
+ma1_type = input.string("EMA", title="Short Type", options=["SMA", "EMA"], group=group1)
+
+ma2_length = input.int(20, title="Medium Length", minval=5, group=group1)
+ma2_type = input.string("EMA", title="Medium Type", options=["SMA", "EMA"], group=group1)
+
+ma3_length = input.int(200, title="Long Length", minval=5, group=group1)
+ma3_type = input.string("SMA", title="Long Type", options=["SMA", "EMA"], group=group1)
+
+// Moving average calculation function
+calculate_ma(ma_type, length) =>
+    ma_type == "SMA" ? ta.sma(close, length) : ta.ema(close, length)
+
+// Calculate the moving averages
+ma1 = calculate_ma(ma1_type, ma1_length)
+ma2 = calculate_ma(ma2_type, ma2_length)
+ma3 = calculate_ma(ma3_type, ma3_length)
+
+// Plot moving averages
+plot(ma1, color=color.orange, linewidth=1, title="MA Short")
+plot(ma2, color=color.yellow, linewidth=2, title="MA Medium")
+plot(ma3, color=color.white, linewidth=2, title="MA Long")
+
+group2 = "Average True Range"
+atr_length = input.int(20, "Length", group=group2)
+atr_add_m = input.float(0.5, "Add multiplier", group=group2)
+atr_exit_m = input.float(2, "Exit multiplier", group=group2)
+atr_buffer = input.float(0.1, "Buffer multiplier", group=group2)
+fvg_min_size = input.float(0.3, "FVG multiplier", maxval=0.8, minval=0.1, group=group2)
+
+group3 = "Relative Strength Index"
+rsi_period = input.int(14, "RSI Period", minval=5, group=group3)
+rsi_max = input.float(80, "RSI Overbought", minval=50, maxval=90, group=group3)
+rsi_min = input.float(20, "RSI Oversold", minval=10, maxval=50, group=group3)
+
+group4 = "Entry Settings"
+clearing_bars = input.int(3, "Bars to clear", group=group4)
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95, group=group4)
+
+
+// ----------
+// Global Variables
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+float atr = ta.atr(atr_length)
+float rsi = ta.rsi(close, rsi_period)
+int entry = na
+int exit = na
+var float breaker = na
+var float pullback = na
+var bool entry_taken = false
+var int trend = 0
+
+
+// ----------
+// RESET
+// ----------
+
+bool cross_bear = ta.crossunder(ma1, ma2)
+bool cross_bull = ta.crossover(ma1, ma2)
+
+if cross_bear or cross_bull
+    entry_taken := false
+    pullback := na
+    trend := cross_bull ? 1 : 2
+    breaker := close
+
+// ----------
+// ENTRY
+// ----------
+
+float entry_highest = ta.highest(high, clearing_bars)[1]
+float entry_lowest = ta.lowest(low, clearing_bars)[1]
+
+if not entry_taken and rsi > rsi_min and rsi < rsi_max
+    float candle_body_size = math.abs(close - open)
+    float candle_full_size = math.abs(high - low)
+    float perv_full_size = math.abs(high[1] - low[1])
+
+    float body_percent = candle_body_size / candle_full_size
+    bool body_ok = body_percent >= min_body_perc / 100 and candle_full_size >= atr * 0.5 and candle_full_size < atr * 4
+
+    bool bear_trend = trend == 2 and is_bear and close < entry_lowest and close < low[1] and close < ma1 and rsi < 50 and (na(pullback) or close < pullback)
+    bool bull_trend = trend == 1 and is_bull and close > entry_highest and close > high[1] and close > ma1 and rsi > 50 and (na(pullback) or close > pullback)
+    bool trend_ok = bear_trend or bull_trend
+
+    bool is_engulfing = body_ok and candle_body_size > perv_full_size + atr * 0.1 and body_percent >= 0.8 and ((bear_trend and is_bull[1]) or (bull_trend and is_bear[1]))
+
+    if is_engulfing
+        entry := trend
+
+    // Aggressive reversal entry
+    else if body_ok and ((trend == 2 and is_bull and is_bear[1] and low < ma1 and close > ma2 and close > entry_highest) or (trend == 1 and is_bear and is_bull[1] and high > ma1 and close < ma2 and close < entry_lowest))
+        entry := trend == 1 ? 2 : 1
+
+    // We need to wait retest before entry
+    else if na(pullback)
+        if trend == 1 and is_bear and close > ma2
+            pullback := high
+
+        else if trend == 2 and is_bull and close < ma2
+            pullback := low
+
+    // Entry validations
+    else if body_ok and bull_trend and close > breaker
+        entry := 1
+
+
+    else if body_ok and bear_trend and close < breaker
+        entry := 2
+
+    if not na(entry)
+        entry_taken := true
+
+    // Check if we can get better pullback price
+    else if trend == 1 and is_bear and high < pullback and high > ma2
+        pullback := high
+
+    else if trend == 2 and is_bull and low > pullback and low < ma2
+        pullback := low
+
+
+// ----------
+//  VISUAL
+// ----------
+
+entry_color = color.white
+plot_size = size.tiny
+plot_bull = location.belowbar
+plot_bear = location.abovebar
+
+plotshape(entry == 1, title="Long Entry", style=shape.triangleup, location=plot_bull, color=entry_color, size=plot_size)
+plotshape(entry == 2, title="Short Entry", style=shape.triangledown, location=plot_bear, color=entry_color, size=plot_size)
+
+
+// ----------
+//  ALERTS
+// ----------
+
+bool alert_check = not na(entry)
+alertcondition(alert_check, title="New entry", message="New signal detected. Confirm the direction of the next candle before entering. Happy trading!")
+
+// ----------
+//  BROKER / EXCHANGE DAILY CANDLES
+// ----------
+
+bool is_ltf = timeframe.in_seconds() <= 43200
+float pdh = request.security(syminfo.tickerid, "D", high[1])
+float pdl = request.security(syminfo.tickerid, "D", low[1])
+float today_open = request.security(syminfo.tickerid, "D", open)
+int day_start = request.security(syminfo.tickerid, "D", time)
+bool new_day = ta.change(day_start) != 0 and is_ltf
+int future_time = time + 5 * (time - time[1])
+
+// ----------
+//  DRAW ON DAILY SESSION START
+// ----------
+
+var line pdhLine = na
+var line pdlLine = na
+var line openLine = na
+
+var label pdhLabel = na
+var label pdlLabel = na
+var label openLabel = na
+
+if new_day
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    line.delete(openLine)
+
+    label.delete(pdhLabel)
+    label.delete(pdlLabel)
+    label.delete(openLabel)
+
+    // Previous Day High
+    pdhLine := line.new(day_start, pdh, future_time, pdh,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = color.red,
+        style = line.style_dashed)
+
+    // Previous Day Low
+    pdlLine := line.new(day_start, pdl, future_time, pdl,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = color.green,
+        style = line.style_dashed)
+
+    // Today Open
+    openLine := line.new(day_start, today_open, future_time, today_open,
+        xloc = xloc.bar_time,
+        extend = extend.none,
+        color = color.blue,
+        width = 2)
+
+    // Labels (right side, transparent)
+    pdhLabel := label.new(future_time, pdh, "PDH",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.red,
+        color = color.new(color.red, 100))
+
+    pdlLabel := label.new(future_time, pdl, "PDL",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.green,
+        color = color.new(color.green, 100))
+
+    openLabel := label.new(future_time, today_open, "OPEN",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.blue,
+        color = color.new(color.blue, 100))
