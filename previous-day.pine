@@ -1,0 +1,239 @@
+//@version=6
+indicator("Previous Day High and Low", shorttitle="PD", overlay=true, max_labels_count=200)
+
+// ----------
+//  SETTINGS
+// ----------
+
+min_body_perc = input.float(40, "Min body %", minval=20, maxval=95)
+
+group_atr = "Average True Range"
+atr_length = input.int(20, "Length", group=group_atr)
+atr_min_m = input.float(0.5, "Min body multiplier", group=group_atr)
+atr_buf_m = input.float(0.1, "Buffer multiplier", group=group_atr)
+
+
+// ----------
+//  GLOBALS
+// ----------
+
+float atr = ta.atr(atr_length)
+
+bool breaker_active = false
+bool is_bear = close < open
+bool is_bull = close > open
+int signal = na
+var bool inside_play = false
+var bool outside_play = false
+var float breaker_high = na
+var float breaker_low = na
+var float pullback = na
+var float reject_high = na
+var float reject_low = na
+var int trend = na
+var int trend_range = na
+
+
+// ----------
+//  DAILY LEVELS
+// ----------
+
+bool is_ltf = timeframe.in_seconds() <= 43200
+
+[pdh, pdl, today_open, day_start] = request.security(syminfo.tickerid, "D", [high, low, open, time], lookahead=barmerge.lookahead_off)
+pmi = (pdh + pdl) / 2
+
+bool new_day = ta.change(day_start) != 0 and is_ltf
+int future_bar = time + 5 * (time - time[1])
+
+
+// ----------
+//  DAILY LEVEL LINES
+// ----------
+
+var label middle_label = na
+var label open_label = na
+var label pdh_label = na
+var label pdl_label = na
+var line middle_line = na
+var line open_line = na
+var line pdh_line = na
+var line pdl_line = na
+
+if new_day
+    breaker_high := na
+    breaker_low := na
+    inside_play := false
+    outside_play := false
+    pullback := na
+    reject_high := na
+    reject_low := na
+    trend := na
+    trend_range := na
+
+    prev_down = pdl[1]
+    prev_up = pdh[1]
+    prev_middle = (prev_up + prev_down) / 2
+
+    label.delete(middle_label)
+    label.delete(open_label)
+    label.delete(pdh_label)
+    label.delete(pdl_label)
+    line.delete(middle_line)
+    line.delete(open_line)
+    line.delete(pdh_line)
+    line.delete(pdl_line)
+
+    line_style = line.style_dashed
+
+    pdh_line := line.new(day_start, prev_up, future_bar, prev_up,
+        xloc = xloc.bar_time,
+        color = color.red,
+        style = line_style)
+
+    pdl_line := line.new(day_start, prev_down, future_bar, prev_down,
+        xloc = xloc.bar_time,
+        color = color.green,
+        style = line_style)
+
+    open_line := line.new(day_start, today_open, future_bar, today_open,
+        xloc = xloc.bar_time,
+        color = color.new(color.white, 20),
+        style = line_style)
+
+    middle_line := line.new(day_start, prev_middle, future_bar, prev_middle,
+        xloc = xloc.bar_time,
+        color = color.gray,
+        style = line_style)
+
+    pdh_label := label.new(future_bar, prev_up, "PDH",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.red,
+        color = color.new(color.red, 100))
+
+    pdl_label := label.new(future_bar, prev_down, "PDL",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.green,
+        color = color.new(color.green, 100))
+
+    open_label := label.new(future_bar, today_open, "OPEN",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.new(color.white, 20),
+        color = color.new(color.white, 100))
+
+    middle_label := label.new(future_bar, prev_middle, "MID",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.gray,
+        color = color.new(color.gray, 100))
+
+
+// ----------
+//  ENTRY AND RESET
+// ----------
+
+float buffer = atr * atr_buf_m
+bool reset = false
+
+// Candle validation
+float body_size = math.abs(close - open)
+float candle_size = math.abs(high - low)
+float body_percent = body_size / candle_size
+bool body_ok = body_percent >= min_body_perc / 100 and body_size >= atr * atr_min_m and candle_size < atr * 4
+
+
+// Inside Range Play
+if not inside_play and close < pdh and close > pdl
+    bool bear_cross = open > pdh and close < pdh
+    bool bull_cross = open < pdl and close > pdl
+
+    if bear_cross or bull_cross
+        pullback := na
+        trend := bull_cross ? 3 : 4
+
+    // Perfect bounce
+    bool bear_reversal = is_bear and is_bull[2] and high[1] > pdh and high[1] > high[3] and high[1] < high and close < low[1] and open[1] < pdh and close > pmi
+    bool bull_reversal = is_bull and is_bear[2] and low[1] < pdl and low[1] < low[3] and low[1] < low and close > high[1] and open[1] > pdl and close < pmi
+
+    if body_ok and (bear_reversal or bull_reversal)
+        signal := bull_reversal ? 3 : 4
+
+    else if na(pullback)
+        if trend == 3 and is_bear and close > pdl and high < pmi
+            pullback := high
+
+        else if trend == 4 and is_bull and close < pdh and low > pmi
+            pullback := low
+
+    else if body_ok and ((trend == 3 and is_bull and close > pullback + buffer) or (trend == 4 and is_bear and close < pullback - buffer))
+        signal := trend
+
+
+    if not na(signal)
+        inside_play := true
+        outside_play := false
+        pullback := na
+
+
+// Outside Play
+if not outside_play and (close < pdl or close > pdh)
+    // New breaker
+    bool broke_pdh = is_bull and close > pdh and open < pdh
+    bool broke_pdl = is_bear and open > pdl and close < pdl
+
+    // Reset all values when new break happens
+    if broke_pdh or broke_pdl
+        breaker_high := high
+        breaker_low := low
+        pullback := na
+        trend := broke_pdh ? 1 : 2
+
+        // Reset inside play
+        reject_high := na
+        reject_low := na
+
+    if not na(breaker_high) and not na(trend)
+        if body_ok and ((trend == 1 and is_bull and low < pdh - buffer and close > pdh + buffer and open > pdh) or (trend == 2 and is_bear and high > pdl + buffer and close < pdl + buffer and open < pdl))
+            signal := trend
+
+        else if na(pullback)
+            if trend == 1 and is_bear and open > pdh
+                pullback := high
+
+            else if trend == 2 and is_bull and open < pdl
+                pullback := low
+
+        else if body_ok and ((trend == 1 and is_bull and close > pullback + buffer) or (trend == 2 and is_bear and close < pullback - buffer))
+            signal := trend
+            inside_play := false
+            outside_play := true
+            pullback := na
+
+        else if trend == 1 and is_bear and high < pullback and open > pdh
+            pullback := high
+
+        else if trend == 2 and is_bull and low > pullback and open < pdh
+            pullback := low
+
+
+
+// ----------
+//  VISUALS
+// ----------
+
+plot_color = color.white
+plot_size = size.tiny
+plot_up = location.belowbar
+plot_down = location.abovebar
+plot_shape = shape.diamond
+
+plotshape(signal == 1, title="Long above PDH", style=plot_shape, location=plot_up, color=plot_color, size=plot_size)
+plotshape(signal == 2, title="Short below PDL", style=plot_shape, location=plot_down, color=plot_color, size=plot_size)
+
+plot_shape := shape.circle
+
+plotshape(signal == 3, title="Long inside", style=plot_shape, location=plot_up, color=plot_color, size=plot_size)
+plotshape(signal == 4, title="Short inside", style=plot_shape, location=plot_down, color=plot_color, size=plot_size)
