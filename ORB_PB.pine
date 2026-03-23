@@ -1,0 +1,160 @@
+//@version=6
+indicator("Opening Range Breakout", shorttitle="ORB", overlay=true, max_boxes_count=200, max_labels_count=50)
+
+// =============================================================================
+//  SETTINGS
+// =============================================================================
+
+nySesh = input.session("0930-0945", "Opening Range", tooltip="Default is NY market open 9:30-9:45 ET")
+tz = input.string("America/New_York", "Timezone", options=["America/New_York", "UTC", "Europe/London"])
+
+entry_bars = input.int(5, "Clearing bars for Long")
+min_body_perc = input.float(40, "Min entry candle body %", minval=20, maxval=95, step=1)
+
+ma_length = input.int(200, "SMA Length", maxval=300, minval=5)
+ma = ta.sma(close, ma_length)
+plot(ma, color=color.white, linewidth=2, title="SMA")
+
+atr_length = input.int(20, "ATR length")
+
+// Style colors
+ny_bg = input.color(color.new(color.aqua, 95), "Opening Range Box", inline="style")
+ny_brdr = color.new(ny_bg, 60)
+
+// =============================================================================
+//  GLOBAL VARIABLES
+// =============================================================================
+
+bool is_bear = close < open
+bool is_bull = close > open
+float atr_val = ta.atr(atr_length)
+float vol_avg = ta.sma(volume, 14)
+int entry = na
+float clear_low = ta.lowest(low, entry_bars)[1]
+float clear_high = ta.highest(high, entry_bars)[1]
+var bool orb_entry = false
+var bool sma_entry = false
+var box or_bx = na
+var float orb_pullback = na
+var float orh = na
+var float orl = na
+var int trend = na
+var float sma_pullback = na
+var int session_start_bar = 0
+
+// =============================================================================
+//  CANDLE PATTERN DEFINITIONS
+// =============================================================================
+
+float body_size = math.abs(close - open)
+float candle_size = math.abs(high - low)
+float prev_candle_size = math.abs(high[1] - low[1])
+float prev_body_size = math.abs(close[1] - open[1])
+
+bool elephant_body = body_size / candle_size >= min_body_perc / 100
+bool elephant_range = body_size > prev_candle_size and (candle_size > prev_candle_size * 1.2 or body_size > prev_body_size * 2) and volume > vol_avg
+bool body_ok = elephant_body and elephant_range
+
+float breakout_buffer = atr_val * 0.1
+
+// =============================================================================
+//  SMA ENTRY
+// =============================================================================
+
+bool cross_bear = ta.crossunder(close, ma)
+bool cross_bull = ta.crossover(close, ma)
+
+if cross_bear or cross_bull
+    sma_entry := false
+    sma_pullback := na
+    trend := cross_bull ? 1 : 2
+
+if not sma_entry
+    if na(sma_pullback)
+        if trend == 1 and is_bear
+            sma_pullback := high
+
+        else if trend == 2 and is_bull
+            sma_pullback := low
+
+    else
+        bool bear_break = trend == 2 and  is_bear and close < clear_low - breakout_buffer and close < sma_pullback
+        bool bull_break = trend == 1 and is_bull and close > clear_high + breakout_buffer and close > sma_pullback
+
+        if body_ok and (bear_break or bull_break)
+            entry := trend == 1 ? 1 : 2
+            sma_entry := true
+            sma_pullback := na
+
+        else if trend == 1 and is_bear and sma_pullback > high
+            sma_pullback := high
+
+        else if trend == 2 and is_bull and low > sma_pullback
+            sma_pullback := low
+
+// =============================================================================
+//  SESSION DETECTION
+// =============================================================================
+
+in_ny = not na(time(timeframe.period, nySesh, tz))
+new_ny = in_ny and not in_ny[1]
+
+if new_ny
+    orb_entry := false
+    orb_pullback := na
+    orh := high
+    orl := low
+    session_start_bar := bar_index
+    or_bx := box.new(bar_index, high, bar_index + 1, low, border_color=ny_brdr, bgcolor=ny_bg, extend=extend.none)
+
+if not na(or_bx) and in_ny
+    orh := math.max(orh, high)
+    orl := math.min(orl, low)
+    box.set_top(or_bx, orh)
+    box.set_bottom(or_bx, orl)
+    box.set_right(or_bx, bar_index + 1)
+
+// =============================================================================
+//  90-MINUTE ORB TRADING WINDOW
+// =============================================================================
+
+int bars_since_start = bar_index - session_start_bar
+int max_bars_90min = int(90 / timeframe.in_seconds(timeframe.period) * 60)
+bool within_90min = bars_since_start <= max_bars_90min
+
+// Extend box until entry taken or 90 minutes passed
+if not na(or_bx) and not orb_entry and within_90min
+    box.set_right(or_bx, bar_index + 1)
+
+// =============================================================================
+//  ORB ENTRY
+// =============================================================================
+
+if not orb_entry and within_90min and not na(orh) and not na(orl)
+
+    if na(orb_pullback)
+        if trend == 1 and is_bear and close > orh and orh > low
+            orb_pullback := high
+
+        else if trend == 2 and is_bull and close < orl and high > orl
+            orb_pullback := low
+
+    else if body_ok and ((trend == 1 and is_bull and close > orb_pullback + breakout_buffer) or (trend == 2 and is_bear and close < orb_pullback - breakout_buffer))
+        entry := trend == 1 ? 1 : 2
+        orb_entry := true
+        orb_pullback := na
+
+// =============================================================================
+//  VISUAL SIGNALS
+// =============================================================================
+
+plotshape(entry == 1, title="Long Entry", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0))
+plotshape(entry == 2, title="Short Entry", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0))
+
+// =============================================================================
+//  ALERTS
+// =============================================================================
+
+alertcondition(not na(entry), title="New Entry Signal", message="New Quick Flip Scalper Signal")
+alertcondition(entry == 1, title="Long Entry Signal", message="Quick Flip Scalper: LONG entry")
+alertcondition(entry == 2, title="Short Entry Signal", message="Quick Flip Scalper: SHORT entry")

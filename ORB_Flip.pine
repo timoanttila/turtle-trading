@@ -1,0 +1,167 @@
+// Quick Flip Scalper - Opening Range Breakout Strategy
+// Based on the strategy that takes advantage of liquidity candles
+// and reversal patterns within the first 90 minutes of market open.
+// © Enhanced version with Hammer and Engulfing candle patterns
+
+//@version=6
+indicator("Quick Flip Scalper [Enhanced ORB]", shorttitle="QFS", overlay=true, max_boxes_count=300, max_labels_count=300)
+
+// =============================================================================
+//  SETTINGS
+// =============================================================================
+
+nySesh = input.session("0930-0945", "Opening Range", tooltip="Default is NY market open 9:30-9:45 ET")
+tz = input.string("America/New_York", "Timezone", options=["America/New_York", "UTC", "Europe/London"])
+
+entry_bars = input.int(5, "Clearing bars for Long")
+min_body_perc = input.float(40, "Min entry candle body %", minval=20, maxval=95, step=1)
+
+// Style colors
+ny_bg = input.color(color.new(color.aqua, 95), "Opening Range Box", inline="style")
+ny_brdr = color.new(ny_bg, 60)
+
+// =============================================================================
+//  GLOBAL VARIABLES
+// =============================================================================
+
+var box or_bx = na
+var float orh = na
+var float orl = na
+var int entries = 0
+var int session_start_bar = 0
+var int breaker_direction = 0
+var float breaker = na
+var float pullback = na
+var bool reversal_active = false
+int entry = na
+
+// =============================================================================
+//  SESSION DETECTION
+// =============================================================================
+
+in_ny = not na(time(timeframe.period, nySesh, tz))
+new_ny = in_ny and not in_ny[1]
+
+if new_ny
+    orh := high
+    orl := low
+    entries := 0
+    breaker_direction := 0
+    breaker := na
+    pullback := na
+    reversal_active := false
+    session_start_bar := bar_index
+    or_bx := box.new(bar_index, high, bar_index + 1, low, border_color=ny_brdr, bgcolor=ny_bg, extend=extend.none)
+
+if not na(or_bx) and in_ny
+    orh := math.max(orh, high)
+    orl := math.min(orl, low)
+    box.set_top(or_bx, orh)
+    box.set_bottom(or_bx, orl)
+    box.set_right(or_bx, bar_index + 1)
+
+// =============================================================================
+//  90-MINUTE TRADING WINDOW
+// =============================================================================
+
+int bars_since_start = bar_index - session_start_bar
+int max_bars_90min = int(90 / timeframe.in_seconds(timeframe.period) * 60)
+bool within_90min = bars_since_start <= max_bars_90min
+
+// Extend box until 2 entries taken or 90 minutes passed
+if not na(or_bx) and entries < 2 and within_90min
+    box.set_right(or_bx, bar_index + 1)
+
+// =============================================================================
+//  CANDLE PATTERN DEFINITIONS
+// =============================================================================
+
+bool is_bull = close > open
+bool is_bear = close < open
+float candle_body = math.abs(close - open)
+float upper_wick = high - math.max(open, close)
+float lower_wick = math.min(open, close) - low
+
+float entry_lowest = ta.lowest(low, entry_bars)[1]
+float entry_highest = ta.highest(high, entry_bars)[1]
+
+float candle_full = math.abs(high - low)
+bool candle_body_percent = (candle_body / candle_full) * 100 >= min_body_perc
+
+float prev_full = math.abs(high[1] - low[1])
+float prev_body = math.abs(close[1] - open[1])
+
+bool is_engulfing = candle_body > prev_full or candle_body > prev_body * 2
+
+// =============================================================================
+//  ENTRY LOGIC
+// =============================================================================
+
+if entries < 2 and within_90min and not na(orh) and not na(orl)
+
+    // Detect breaker direction
+    if breaker_direction == 0
+        if close > orh
+            breaker_direction := 1
+            breaker := high
+        else if close < orl
+            breaker_direction := 2
+            breaker := low
+
+    if breaker_direction == 1 and close > orh
+
+        if upper_wick > candle_body * 2 and lower_wick < candle_body and high > entry_highest
+            pullback := low
+            reversal_active := true
+
+        else if is_bear and is_engulfing and close < entry_lowest
+            entry := 2
+
+        if not na(entry)
+            if na(pullback) and not reversal_active
+                if low < orh or is_bear
+                    pullback := high
+
+            else if is_bear and reversal_active and close < pullback and close < entry_lowest
+                entry := 2
+
+            else if is_bull and close > pullback and close > breaker
+                entry := 1
+
+    else if breaker_direction == 2 and close < orl
+
+        if lower_wick >= candle_body * 2 and upper_wick < candle_body and not na(orl) and low < entry_lowest
+            pullback := high
+            reversal_active := true
+
+        else if is_bull and is_engulfing and close > entry_highest
+            entry := 1
+
+        if na(entry)
+            if na(pullback) and not reversal_active
+                if high > orh
+                    pullback := low
+
+            else if is_bull and reversal_active and close > pullback and close > entry_highest
+                entry := 1
+
+            else if is_bear and close < pullback and close < breaker
+                entry := 2
+
+if not na(entry)
+    entries := entries + 1
+
+// =============================================================================
+//  VISUAL SIGNALS
+// =============================================================================
+
+plotshape(entry == 1, title="Long Entry", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.new(color.green, 0))
+plotshape(entry == 2, title="Short Entry", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.new(color.red, 0))
+
+// =============================================================================
+//  ALERTS
+// =============================================================================
+
+alertcondition(not na(entry), title="New Entry Signal", message="New Quick Flip Scalper Signal")
+alertcondition(entry == 1, title="Long Entry Signal", message="Quick Flip Scalper: LONG entry")
+alertcondition(entry == 2, title="Short Entry Signal", message="Quick Flip Scalper: SHORT entry")

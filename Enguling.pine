@@ -1,0 +1,67 @@
+// Breakout-based trend indicator that enters when price breaks user-defined highs or lows,
+// adds positions as the trend continues, and uses ATR for stops.
+// © Timo Anttila, Tuspe Design Oy
+
+//@version=6
+indicator("Turtle Strategy [timoanttila]", shorttitle="Turtle", overlay=true, max_labels_count=200)
+
+group1 = "Numbers of clearing bars"
+entry_bars_ltf = input.int(52, "LTF", group=group1)
+entry_bars_htf = input.int(20, "HTF", group=group1)
+exit_bars = input.int(10, "Exit", group=group1)
+
+group2 = "Average True Range"
+atr_length = input.int(20, "Length", group=group2)
+atr_add_m = input.float(0.5, "Add multiplier", group=group2)
+atr_exit_m = input.float(2, "Exit multiplier", group=group2)
+
+group3 = "Moving Averages"
+ma1_length = input.int(20, "SMA1 Length", group=group3)
+ma1 = ta.sma(close, ma1_length)
+plot(ma1, color=color.yellow, linewidth=1, title="SMA1")
+
+ma2_length = input.int(200, "SMA2 Length", group=group3)
+ma2 = ta.sma(close, ma2_length)
+plot(ma2, color=color.white, linewidth=1, title="SMA2")
+
+mad_length = input.int(20, "Daily SMA Length", group=group3)
+
+group4 = "Relative Strength Index"
+rsi_period = input.int(14, "RSI Period", minval=5, group=group4)
+
+group5 = "Entry Settings"
+entry_max = input.int(2, "Max entries per trend", group=group5)
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95, group=group5)
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+float atr = ta.atr(atr_length)
+float rsi = ta.rsi(close, rsi_period)
+int entry = na
+int exit = na
+var bool exit_taken = false
+var float atr_exit = na
+var float last_entry = na
+var int entry_taken = 0
+var int trend = na
+
+// ----------
+//  Displacement
+// ----------
+
+range_type = input.string("Open to Close", "Range Type", options = ['Open to Close', 'High to Low'], group="Displacement")
+dev_period = input.int(100, minval = 1, title = "Deviation Period", group="Displacement")
+dev_multiplier = input.int(3, minval = 0, title = "Deviation Multiplier", group="Displacement")
+
+price_range = range_type == "Open to Close" ? math.abs(open - close) : high - low
+range_deviation = ta.stdev(price_range, dev_period) * dev_multiplier
+
+price_gap = close[1] > open[1] ? high[2] < low[0] : low[2] > high[0]
+is_displaced = price_range[1] > range_deviation[1] and price_gap
+
+barcolor(isDisplaced ? color.maroon : na, offset = -1, title="Displacement Highlight Color")
+alertcondition(isDisplaced, title="Elephant Bar", message="New Displacement / Elephant Bar detected!")
