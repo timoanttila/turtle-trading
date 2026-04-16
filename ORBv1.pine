@@ -1,0 +1,153 @@
+// Marks New York opening range on a chart, tracks breakouts, signals entries
+// with shapes while managing session resets and box updates dynamically.
+// © Timo Anttila, Tuspe Design Oy
+//@version=6
+indicator("Opening Range with Breakouts [timoanttila]", shorttitle="ORB", overlay=true, max_boxes_count=300, max_labels_count=300)
+
+// ----------
+//  SETTINGS
+// ----------
+
+nySesh = input.session("1330-1345", "New York Open")
+tz = "UTC"
+n_bars = input.int(3, "Number of clearing bars", minval=1)
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95)
+
+// Style colors (inline, one row each)
+ny_bg = input.color(color.new(color.aqua, 95), "New York", inline="sesh", group="Style")
+ny_brdr = color.new(ny_bg, 60)
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+bool strong_trend = false
+int entry = 0 // 0=none,1=long,2=short
+var bool entry_taken = false
+var box or_bx = na
+var float break_value = na
+var float orh = na
+var float orl = na
+var float pullback_value = na
+var int  breakout_dir = 0 // 0=none,1=up,2=down
+var int trend_mtf = 0
+
+// ----------
+//  SESSION
+// ----------
+
+in_ny = not na(time(timeframe.period, nySesh, tz))
+new_ny = in_ny and not in_ny[1]
+
+// New session: reset shared state and create new persistent box
+if new_ny
+    break_value := na
+    breakout_dir := 0
+    entry_taken := false
+    orh := high
+    orl := low
+    pullback_value := na
+    or_bx := box.new(bar_index, high, bar_index, low, border_color=ny_brdr, bgcolor=ny_bg)
+
+// Update box: grow top/bottom during session, extend right until entry_taken
+if not na(or_bx)
+    if in_ny
+        orh := math.max(orh, high)
+        orl := math.min(orl, low)
+        box.set_top(or_bx, orh)
+        box.set_bottom(or_bx, orl)
+    if not entry_taken
+        box.set_right(or_bx, bar_index)
+
+// ----------
+//  BIAS
+// ----------
+
+daily_open = request.security(syminfo.tickerid, "D", open, lookahead=barmerge.lookahead_on)
+daily_bias = daily_open < close ? 1 : 2
+// bgcolor(daily_bias == 1 ? color.new(color.green, 75) : color.new(color.red, 75))
+
+// ----------
+//  CANDLE VALIDATION
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+bool strong_candle = false
+float candle_body = math.abs(close - open)
+float candle_full_size = math.abs(high - low)
+float prev_candle_body = math.abs(close[1] - open[1])
+float candle_body_percent = (candle_body / candle_full_size) * 100
+bool candle_valid = candle_body > prev_candle_body and candle_body_percent > min_body_perc
+
+float prev_highest = ta.highest(high, n_bars)[1]
+float prev_lowest = ta.lowest(low, n_bars)[1]
+
+bool cross_in_bear = ta.crossover(close, orl)
+bool cross_in_bull = ta.crossunder(close, orh)
+bool cross_out_bear = ta.crossunder(close, orl)
+bool cross_out_bull = ta.crossover(close, orh)
+
+// ----------
+//  ENTRY CONDITIONS
+// ----------
+
+if not entry_taken
+    if cross_out_bull or cross_out_bear
+        breakout_dir_old = breakout_dir
+        breakout_dir := cross_out_bull ? 1 : 2
+        break_value := cross_out_bull ? high : low
+        entry_taken := false
+
+        if not na(pullback_value) and breakout_dir_old != breakout_dir
+            pullback_value := na
+
+    strong_trend := daily_bias == breakout_dir
+    if not na(breakout_dir) and (close > orh or close < orl)
+
+        strong_candle := strong_trend and candle_body > (prev_candle_body * 1.2) and candle_body_percent > 80
+        if strong_candle and ((breakout_dir == 1 and close < prev_highest) or (breakout_dir == 2 and prev_lowest < close))
+            strong_candle := false
+
+        if strong_candle
+            entry := breakout_dir
+            entry_taken := true
+
+        else if na(pullback_value)
+            if breakout_dir == 1 and ((low < orh and open > orh) or (is_bear and open > orh))
+                pullback_value := high
+
+            else if breakout_dir == 2 and ((high > orl and open < orl) or (is_bull and open < orl))
+                pullback_value := low
+
+        else if candle_valid and strong_trend
+            if breakout_dir == 1 and close > prev_highest and close > pullback_value and close >= break_value
+                entry := 1
+
+            else if breakout_dir == 2 and close < prev_lowest and pullback_value > close and close <= break_value
+                entry := 2
+
+        else
+            if breakout_dir == 1 and (((low < orh and open > orh) or (is_bear and open > orh)) or (is_bear and close > pullback_value))
+                pullback_value := high
+
+            else if breakout_dir == 2 and (((high > orl and open < orl) or (is_bull and open < orl)) and (is_bull and close < pullback_value))
+                pullback_value := low
+
+        if entry > 0
+            entry_taken := true
+
+// ----------
+//  VISUAL INDICATORS
+// ----------
+
+plotshape(entry == 1, title="Bull Entry", style=shape.triangleup, location=location.belowbar, size=size.tiny, color=color.green)
+plotshape(entry == 2, title="Bear Entry", style=shape.triangledown, location=location.abovebar, size=size.tiny, color=color.red)
+
+// ----------
+//  ALERTS
+// ----------
+
+alertcondition(entry > 0, title="New Entry", message="The price broke out of the opening range.")
+alertcondition(entry == 1, title="New Bullish Entry", message="A bullish candle broke out of the opening range.")
+alertcondition(entry == 2, title="New Bearish Entry", message="A bearish candle broke out of the opening range.")

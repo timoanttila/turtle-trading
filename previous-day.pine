@@ -40,7 +40,15 @@ var int trend_range = na
 
 bool is_ltf = timeframe.in_seconds() <= 43200
 
-[pdh, pdl, today_open, day_start] = request.security(syminfo.tickerid, "D", [high, low, open, time], lookahead=barmerge.lookahead_off)
+// For drawing - lookahead_off is fine, visuals are always correct
+[pdh_draw, pdl_draw, today_open, day_start] = request.security(syminfo.tickerid, "D", [high, low, open, time], lookahead=barmerge.lookahead_off)
+
+// For signal logic and alerts - correct real-time values
+[raw_pdh, raw_pdl] = request.security(syminfo.tickerid, "D", [high, low], lookahead=barmerge.lookahead_on)
+
+float pdh = raw_pdh[1]
+float pdl = raw_pdl[1]
+
 pmi = (pdh + pdl) / 2
 
 bool new_day = ta.change(day_start) != 0 and is_ltf
@@ -71,9 +79,8 @@ if new_day
     trend := na
     trend_range := na
 
-    prev_down = pdl[1]
-    prev_up = pdh[1]
-    prev_middle = (prev_up + prev_down) / 2
+
+    prev_middle = (pdh_draw + pdl_draw) / 2
 
     label.delete(middle_label)
     label.delete(open_label)
@@ -86,12 +93,12 @@ if new_day
 
     line_style = line.style_dashed
 
-    pdh_line := line.new(day_start, prev_up, future_bar, prev_up,
+    pdh_line := line.new(day_start, pdh_draw, future_bar, pdh_draw,
         xloc = xloc.bar_time,
         color = color.red,
         style = line_style)
 
-    pdl_line := line.new(day_start, prev_down, future_bar, prev_down,
+    pdl_line := line.new(day_start, pdl_draw, future_bar, pdl_draw,
         xloc = xloc.bar_time,
         color = color.green,
         style = line_style)
@@ -106,13 +113,13 @@ if new_day
         color = color.gray,
         style = line_style)
 
-    pdh_label := label.new(future_bar, prev_up, "PDH",
+    pdh_label := label.new(future_bar, pdh_draw, "PDH",
         xloc = xloc.bar_time,
         style = label.style_label_left,
         textcolor = color.red,
         color = color.new(color.red, 100))
 
-    pdl_label := label.new(future_bar, prev_down, "PDL",
+    pdl_label := label.new(future_bar, pdl_draw, "PDL",
         xloc = xloc.bar_time,
         style = label.style_label_left,
         textcolor = color.green,
@@ -237,3 +244,85 @@ plot_shape := shape.circle
 
 plotshape(signal == 3, title="Long inside", style=plot_shape, location=plot_up, color=plot_color, size=plot_size)
 plotshape(signal == 4, title="Short inside", style=plot_shape, location=plot_down, color=plot_color, size=plot_size)
+
+// ----------
+//  BIAS TABLE (SIMPLIFIED)
+// ----------
+
+// Inputs
+group_bias = "Trend Table"
+sma_len = input.int(20, "SMA Length", minval=1, group=group_bias)
+c_bull = input.color(color.new(#26a69a, 0), "Bull", group=group_bias)
+c_bear = input.color(color.new(#ef5350, 0), "Bear", group=group_bias)
+
+// HTF data (only close + SMA now)
+get_htf(tf) =>
+    sma_val = ta.sma(close, sma_len)
+    request.security(syminfo.tickerid, tf, [close, sma_val], lookahead=barmerge.lookahead_on)
+
+[c_1h, sma_1h] = get_htf("60")
+[c_4h, sma_4h] = get_htf("240")
+[c_d, sma_d] = get_htf("1D")
+[c_w, sma_w] = get_htf("1W")
+
+// Simple bias: ONLY SMA comparison
+get_bias(c, sma) =>
+    c > sma ? 1 : -1
+
+bias_1h = get_bias(c_1h, sma_1h)
+bias_4h = get_bias(c_4h, sma_4h)
+bias_d  = get_bias(c_d, sma_d)
+bias_w  = get_bias(c_w, sma_w)
+
+// Chart TF helpers
+chart_mins = timeframe.in_seconds() / 60
+is_below_1h = chart_mins <= 60
+is_below_4h = chart_mins <= 240
+is_below_d  = chart_mins <= 1440
+
+// Labels & colors
+bias_label(b) =>
+    b == 1 ? "▲ Bull" : "▼ Bear"
+
+bias_color(b) =>
+    b == 1 ? c_bull : c_bear
+
+hdr_bg = color.new(#1e222d, 0)
+hdr_txt = color.new(#d1d4dc, 0)
+
+// Table
+var table tbl = table.new(
+     position.bottom_left, 5, 2,
+     bgcolor=color.new(#1e222d, 10),
+     border_width=1,
+     border_color=color.new(#363a45, 0))
+
+cell(col, row, txt, txt_color, bg) =>
+    table.cell(tbl, col, row, txt,
+        text_color=txt_color,
+        bgcolor=bg,
+        text_size=size.normal,
+        text_halign=text.align_center,
+        width=4)
+
+if barstate.islast
+    col = 0
+
+    // Weekly
+    cell(col, 0, "Weekly", hdr_txt, hdr_bg)
+    cell(col, 1, bias_label(bias_w), hdr_txt, color.new(bias_color(bias_w), 50))
+    col += 1
+
+    if is_below_d
+        cell(col, 0, "Daily", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_d), hdr_txt, color.new(bias_color(bias_d), 50))
+        col += 1
+
+    if is_below_4h
+        cell(col, 0, "4H", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_4h), hdr_txt, color.new(bias_color(bias_4h), 50))
+        col += 1
+
+    if is_below_1h
+        cell(col, 0, "1H", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_1h), hdr_txt, color.new(bias_color(bias_1h), 50))

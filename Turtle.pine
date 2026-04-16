@@ -3,7 +3,7 @@
 // © Timo Anttila, Tuspe Design Oy
 
 //@version=6
-indicator("Turtle Strategy [timoanttila]", shorttitle="Turtle", overlay=true, max_labels_count=200)
+indicator("Daddy's Turtle Strategy", shorttitle="Turtle", overlay=true, max_labels_count=200)
 
 group1 = "Numbers of clearing bars"
 entry_bars_ltf = input.int(52, "LTF", group=group1)
@@ -20,14 +20,13 @@ ma1_length = input.int(20, "SMA1 Length", group=group3)
 ma1 = ta.sma(close, ma1_length)
 plot(ma1, color=color.yellow, linewidth=1, title="SMA1")
 
-ma2_length = input.int(200, "SMA2 Length", group=group3)
+ma2_length = input.int(50, "SMA2 Length", group=group3)
 ma2 = ta.sma(close, ma2_length)
-plot(ma2, color=color.white, linewidth=1, title="SMA2")
+plot(ma2, color=color.orange, linewidth=1, title="SMA2")
 
-mad_length = input.int(20, "Daily SMA Length", group=group3)
-
-group4 = "Relative Strength Index"
-rsi_period = input.int(14, "RSI Period", minval=5, group=group4)
+ma3_length = input.int(200, "SMA3 Length", group=group3)
+ma3 = ta.sma(close, ma3_length)
+plot(ma3, color=color.white, linewidth=1, title="SMA3")
 
 group5 = "Entry Settings"
 entry_max = input.int(2, "Max entries per trend", group=group5)
@@ -40,7 +39,6 @@ min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95,
 bool is_bear = close < open
 bool is_bull = close > open
 float atr = ta.atr(atr_length)
-float rsi = ta.rsi(close, rsi_period)
 int entry = na
 int exit = na
 var bool exit_taken = false
@@ -90,8 +88,8 @@ float entry_highest = ta.highest(high, bars)[1]
 float entry_lowest = ta.lowest(low, bars)[1]
 
 if entry_max > entry_taken
-    bool trend_bear = trend == 2 and is_bear and close < low[1] and close < entry_lowest and (na(last_entry) or high < last_entry) and rsi < 50
-    bool trend_bull = trend == 1 and is_bull and close > high[1] and close > entry_highest and (na(last_entry) or low > last_entry) and rsi > 50
+    bool trend_bear = trend == 2 and is_bear and close < low[1] and close < entry_lowest and (na(last_entry) or high < last_entry)
+    bool trend_bull = trend == 1 and is_bull and close > high[1] and close > entry_highest and (na(last_entry) or low > last_entry)
 
     float body_size = math.abs(close - open)
     float candle_size = math.abs(high - low)
@@ -233,3 +231,84 @@ if new_day
         style = label.style_label_left,
         textcolor = color.gray,
         color = color.new(color.gray, 100))
+
+
+// ----------
+//  BIAS TABLE
+// ----------
+
+// Inputs
+group_bias="Trend Table"
+sma_len = input.int(20, "SMA Length", minval=1, group=group_bias)
+c_bull = input.color(color.new(#26a69a, 0), "Bull", group=group_bias)
+c_bear = input.color(color.new(#ef5350, 0), "Bear", group=group_bias)
+c_neutral = input.color(color.new(#787b86, 0), "Neutral", group=group_bias)
+
+// HTF data (NOW includes open instead of prev high/low)
+get_htf(tf) =>
+    sma_val = ta.sma(close, sma_len)
+    request.security(syminfo.tickerid, tf, [close, open, sma_val], lookahead=barmerge.lookahead_on)
+
+[c_4h, o_4h, sma_4h] = get_htf("240")
+[c_d, o_d, sma_d] = get_htf("1D")
+[c_w, o_w, sma_w] = get_htf("1W")
+
+// Simplified Bias Logic
+get_bias(c, o, sma) =>
+    if c > sma and c > o
+        1
+    else if c < sma and c < o
+        -1
+    else
+        0
+
+bias_4h = get_bias(c_4h, o_4h, sma_4h)
+bias_d = get_bias(c_d, o_d, sma_d)
+bias_w = get_bias(c_w, o_w, sma_w)
+
+// Chart TF helpers
+chart_mins = timeframe.in_seconds() / 60
+is_below_4h = chart_mins <= 240
+is_below_d = chart_mins <= 1440
+
+// Table helpers
+bias_label(b) =>
+    b == 1 ? "▲ Long" : b == -1 ? "▼ Short" : "● Neutral"
+
+bias_color(b) =>
+    b == 1 ? c_bull : b == -1 ? c_bear : c_neutral
+
+hdr_bg = color.new(#1e222d, 0)
+hdr_txt = color.new(#d1d4dc, 0)
+
+// Horizontal layout
+col_count = 1 + (is_below_d ? 1 : 0) + (is_below_4h ? 1 : 0)
+
+var table tbl = table.new(
+     position.bottom_left, 5, 2,
+     bgcolor=color.new(#1e222d, 10),
+     border_width=1,
+     border_color=color.new(#363a45, 0),
+     frame_width=1,
+     frame_color=color.new(#363a45, 0))
+
+cell(col, row, txt, txt_color, bg) =>
+    table.cell(tbl, col, row, txt, text_color=txt_color, bgcolor=bg, text_size=size.normal, text_halign=text.align_center, width=4)
+
+if barstate.islast
+    col = 0
+
+    // Weekly — always visible
+    cell(col, 0, "Weekly", hdr_txt, hdr_bg)
+    cell(col, 1, bias_label(bias_w), hdr_txt, color.new(bias_color(bias_w), 50))
+    col := col + 1
+
+    if is_below_d
+        cell(col, 0, "Daily", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_d), hdr_txt, color.new(bias_color(bias_d), 50))
+        col := col + 1
+
+    if is_below_4h
+        cell(col, 0, "4H", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_4h), hdr_txt, color.new(bias_color(bias_4h), 50))
+        col := col + 1
