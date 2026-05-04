@@ -1,0 +1,363 @@
+//@version=6
+indicator("Daddy's Special Mix", shorttitle="DSM", overlay=true, dynamic_requests=true)
+
+// ----------
+//  VWAP
+// ----------
+
+group1 = "Volume-Weighted Average Price"
+vwap_anchor = input.string("Week", "Anchor", options = ["Session", "Week", "Month"], group=group1)
+
+bool is_ltf = timeframe.in_seconds() <= 14400
+
+// Anchor reset condition
+vwap_achor_letter = is_ltf ? "W" : "M"
+if is_ltf and vwap_anchor != "Week"
+    if vwap_anchor == "Session"
+        vwap_achor_letter := "D"
+
+    else if vwap_anchor == "Month"
+        vwap_achor_letter := "M"
+
+is_new_period = timeframe.change(vwap_achor_letter)
+
+// Cumulative sums reset on new period
+var float cum_vol = 0.0
+var float cum_pv = 0.0
+var float cum_pv2 = 0.0
+
+cum_vol := is_new_period ? volume : cum_vol + volume
+cum_pv := is_new_period ? hlc3 * volume : cum_pv + hlc3 * volume
+cum_pv2 := is_new_period ? hlc3 * hlc3 * volume : cum_pv2 + hlc3 * hlc3 * volume
+
+// VWAP and variance
+vwap = cum_pv / cum_vol
+variance = math.max(cum_pv2 / cum_vol - vwap * vwap, 0.0)
+sd = math.sqrt(variance)
+
+// Standard Diviation
+vwap_upper = vwap + sd
+vwap_lower = vwap - sd
+
+// Plots
+plot(vwap, title = "VWAP", color = color.yellow, linewidth = 2)
+vwap_upper_plot = plot(vwap_upper, title = "VWAP Upper", color = color.aqua, linewidth = 1, display=display.none)
+vwap_lower_plot = plot(vwap_lower, title = "VWAP Lower", color = color.aqua, linewidth = 1, display=display.none)
+fill(vwap_upper_plot, vwap_lower_plot, color = color.new(color.aqua, 95), title = "VWAP SD Fill")
+
+
+// ----------
+//  ATR
+// ----------
+
+group2 = "Average True Range"
+atr_length = input.int(20, "Length", group=group2)
+atr_add_m = input.float(1, "Add multiplier", group=group2)
+atr_buffer_m = input.float(0.15, "Buffer multiplier", group=group2)
+atr_exit_m = input.float(2, "Exit multiplier", group=group2)
+
+
+// ----------
+//  RSI
+// ----------
+
+group3 = "Relative strength index"
+rsi_length = input.int(14, title="RSI Length", group=group3)
+rsi_max = input.int(75, title="Overbought", group=group3)
+rsi_min = input.int(25, title="Oversold", group=group3)
+
+
+// ----------
+//  OTHER SETTINGS
+// ----------
+
+group4 = "Other Settings"
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95, group=group4)
+entry_bars = input.int(3, "Entry bars", minval=0, maxval=60, group=group4)
+exit_bars = input.int(10, "Exit bars", minval=3, maxval=60, group=group4)
+max_entries = input.int(3, "Max entries", minval=1, maxval=10, group=group4)
+
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+float atr = ta.atr(atr_length)
+float atr_buffer = atr * atr_buffer_m
+float rsi = ta.rsi(close, rsi_length)
+int entry = na
+int exit = na
+var bool entry_taken = false
+var bool exit_taken = false
+var float atr_exit = na
+var float breaker = 0
+var float last_entry = na
+var int entries = 0
+var int trend = na
+
+
+// ----------
+//  EXIT
+// ----------
+
+float exit_highest = ta.highest(high, exit_bars)[1]
+float exit_lowest = ta.lowest(low, exit_bars)[1]
+
+if entry_taken and not exit_taken
+    if trend == 1 and (close < exit_lowest or close < atr_exit or close < vwap)
+        exit := 1
+
+    else if trend == 2 and (close > exit_highest or close > atr_exit or close > vwap)
+        exit := 2
+
+    if not na(exit)
+        exit_taken := true
+
+
+// ----------
+//  ENTRY
+// ----------
+
+bool trend_bear = ta.crossunder(close, vwap)
+bool trend_bull = ta.crossover(close, vwap)
+bool reset = trend_bear or trend_bull
+
+if reset
+    entries := 0
+    trend := trend_bull ? 1 : 2
+
+if is_new_period or not na(exit) or (trend == 1 and low < vwap_lower) or (trend == 2 and high > vwap_upper)
+    last_entry := trend == 1 ? high : low
+
+if reset or (entry_taken and exit_taken and close < vwap_upper and close > vwap_lower)
+    entry_taken := false
+    exit_taken := false
+
+float highest = ta.highest(high, entry_bars)[1]
+float lowest = ta.lowest(low, entry_bars)[1]
+
+if max_entries > entries and not entry_taken
+    bool rsi_ok = rsi < rsi_max and rsi > rsi_min
+
+    float body_size = math.abs(close - open)
+    float candle_size = math.abs(high - low)
+    bool body_ok = body_size / candle_size >= min_body_perc / 100 and candle_size > atr * 0.5 and candle_size < atr * 4
+
+    if rsi_ok and body_ok
+        // Minimum candles
+        bool bearish_clear = close < vwap and is_bear and close < lowest - atr_buffer and rsi < 50 and open < vwap_upper
+        bool bullish_clear = close > vwap and is_bull and close > highest + atr_buffer and rsi > 50 and open > vwap_lower
+
+        if bullish_clear and (close > vwap_upper + atr_buffer or (is_bear[2] and is_bear[3] and ((is_bear[1] and low[1] < low[2]) or (is_bull[1] and is_bear[4] and close > high[4] and high[1] < high[3])) and low[2] < low[3]))
+            entry := 1
+
+        else if bearish_clear and (close < vwap_lower - atr_buffer or (is_bull[2] and is_bull[3] and ((is_bull[1] and high[1] > high[2]) or (is_bear[1] and is_bull[4] and close < low[4] and low[1] > low[3])) and high[2] > high[3]))
+            entry := 2
+
+        if not na(entry)
+            breaker := trend == 1 ? high : low
+            entries := entries + 1
+            entry_taken := true
+
+            float atr_add = atr * atr_add_m
+            float atr_sl_size = atr_exit_m * atr
+
+            if trend == 1
+                atr_exit := close - atr_sl_size
+                last_entry := close + atr_add
+
+            else
+                atr_exit := close + atr_sl_size
+                last_entry := close - atr_add
+
+            if not na(exit)
+                exit := na
+
+// ----------
+//  ALERTS
+// ----------
+
+plot_color = color.new(color.white, 30)
+plot_size = size.tiny
+plot_bull = location.belowbar
+plot_bear = location.abovebar
+
+plotshape(entry == 1, title="Long", style=shape.triangleup, location=plot_bull, color=plot_color, size=plot_size)
+plotshape(entry == 2, title="Short", style=shape.triangledown, location=plot_bear, color=plot_color, size=plot_size)
+
+plot_color := color.new(color.gray, 10)
+plot_shape = shape.xcross
+plotshape(exit == 1, title="Long Exit", style=plot_shape, location=plot_bull, color=plot_color, size=plot_size)
+plotshape(exit == 2, title="Short Exit", style=plot_shape, location=plot_bear, color=plot_color, size=plot_size)
+
+alertcondition(not na(entry), title="New Signal", message="New signal detected. Confirm the direction of the next candle before entering. Happy trading!")
+
+
+// ----------
+//  DAILY LEVELS
+// ----------
+
+[pdh, pdl, today_open, day_start] = request.security(syminfo.tickerid, "D", [high, low, open, time], lookahead=barmerge.lookahead_off)
+pmi = (pdh + pdl) / 2
+
+is_ltf := timeframe.in_seconds() <= 7200
+bool new_day = ta.change(day_start) != 0 and is_ltf
+int future_bar = time + 5 * (time - time[1])
+
+
+// ----------
+//  DAILY LEVEL LINES
+// ----------
+
+var label middle_label = na
+var label open_label = na
+var label pdh_label = na
+var label pdl_label = na
+var line middle_line = na
+var line open_line = na
+var line pdh_line = na
+var line pdl_line = na
+
+if new_day
+
+    prev_down = pdl[1]
+    prev_up = pdh[1]
+    prev_middle = (prev_up + prev_down) / 2
+
+    label.delete(middle_label)
+    label.delete(open_label)
+    label.delete(pdh_label)
+    label.delete(pdl_label)
+    line.delete(middle_line)
+    line.delete(open_line)
+    line.delete(pdh_line)
+    line.delete(pdl_line)
+
+    line_style = line.style_dashed
+
+    pdh_line := line.new(day_start, prev_up, future_bar, prev_up,
+        xloc = xloc.bar_time,
+        color = color.red,
+        style = line_style)
+
+    pdl_line := line.new(day_start, prev_down, future_bar, prev_down,
+        xloc = xloc.bar_time,
+        color = color.green,
+        style = line_style)
+
+    open_line := line.new(day_start, today_open, future_bar, today_open,
+        xloc = xloc.bar_time,
+        color = color.new(color.white, 20),
+        style = line_style)
+
+    middle_line := line.new(day_start, prev_middle, future_bar, prev_middle,
+        xloc = xloc.bar_time,
+        color = color.gray,
+        style = line_style)
+
+    pdh_label := label.new(future_bar, prev_up, "PDH",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.red,
+        color = color.new(color.red, 100))
+
+    pdl_label := label.new(future_bar, prev_down, "PDL",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.green,
+        color = color.new(color.green, 100))
+
+    open_label := label.new(future_bar, today_open, "OPEN",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.new(color.white, 20),
+        color = color.new(color.white, 100))
+
+    middle_label := label.new(future_bar, prev_middle, "MID",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.gray,
+        color = color.new(color.gray, 100))
+
+
+// ----------
+//  BIAS TABLE
+// ----------
+
+// Inputs
+group_bias="Trend Table"
+sma_len = input.int(20, "SMA Length", minval=1, group=group_bias)
+c_bull = input.color(color.new(#26a69a, 0), "Bull", group=group_bias)
+c_bear = input.color(color.new(#ef5350, 0), "Bear", group=group_bias)
+c_neutral = input.color(color.new(#787b86, 0), "Neutral", group=group_bias)
+
+// HTF data (NOW includes open instead of prev high/low)
+get_htf(tf) =>
+    sma_val = ta.sma(close, sma_len)
+    request.security(syminfo.tickerid, tf, [close, open, sma_val], lookahead=barmerge.lookahead_on)
+
+[c_4h, o_4h, sma_4h] = get_htf("240")
+[c_d, o_d, sma_d] = get_htf("1D")
+[c_w, o_w, sma_w] = get_htf("1W")
+
+// Simplified Bias Logic
+get_bias(c, o, sma) =>
+    if c > sma and c > o
+        1
+    else if c < sma and c < o
+        -1
+    else
+        0
+
+bias_4h = get_bias(c_4h, o_4h, sma_4h)
+bias_d = get_bias(c_d, o_d, sma_d)
+bias_w = get_bias(c_w, o_w, sma_w)
+
+// Chart TF helpers
+chart_mins = timeframe.in_seconds() / 60
+is_below_4h = chart_mins <= 240
+is_below_d = chart_mins <= 1440
+
+// Table helpers
+bias_label(b) =>
+    b == 1 ? "▲ Long" : b == -1 ? "▼ Short" : "● Neutral"
+
+bias_color(b) =>
+    b == 1 ? c_bull : b == -1 ? c_bear : c_neutral
+
+hdr_bg = color.new(#1e222d, 0)
+hdr_txt = color.new(#d1d4dc, 0)
+
+// Horizontal layout
+col_count = 1 + (is_below_d ? 1 : 0) + (is_below_4h ? 1 : 0)
+
+var table tbl = table.new(
+     position.bottom_left, 5, 2,
+     bgcolor=color.new(#1e222d, 10),
+     border_width=1,
+     border_color=color.new(#363a45, 0),
+     frame_width=1,
+     frame_color=color.new(#363a45, 0))
+
+cell(col, row, txt, txt_color, bg) =>
+    table.cell(tbl, col, row, txt, text_color=txt_color, bgcolor=bg, text_size=size.normal, text_halign=text.align_center, width=4)
+
+if barstate.islast
+    col = 0
+
+    // Weekly — always visible
+    cell(col, 0, "Weekly", hdr_txt, hdr_bg)
+    cell(col, 1, bias_label(bias_w), hdr_txt, color.new(bias_color(bias_w), 50))
+    col := col + 1
+
+    if is_below_d
+        cell(col, 0, "Daily", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_d), hdr_txt, color.new(bias_color(bias_d), 50))
+        col := col + 1
+
+    if is_below_4h
+        cell(col, 0, "4H", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_4h), hdr_txt, color.new(bias_color(bias_4h), 50))
+        col := col + 1

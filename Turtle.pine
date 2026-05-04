@@ -1,0 +1,311 @@
+// Breakout-based trend indicator that enters when price breaks user-defined highs or lows,
+// adds positions as the trend continues, and uses ATR for stops.
+// © Timo Anttila, Tuspe Design Oy
+
+//@version=6
+indicator("Daddy's Turtle Strategy", shorttitle="Turtle", overlay=true, max_labels_count=200)
+
+group1 = "Numbers of clearing bars"
+entry_bars = input.int(20, "Entry", group=group1)
+exit_bars = input.int(10, "Exit", group=group1)
+
+group2 = "Average True Range"
+atr_length = input.int(20, "Length", group=group2)
+atr_add_m = input.float(0.5, "Add multiplier", group=group2)
+atr_exit_m = input.float(2, "Exit multiplier", group=group2)
+
+group3 = "Moving Averages"
+ma1_length = input.int(20, "SMA1 Length", group=group3)
+ma1 = ta.sma(close, ma1_length)
+plot(ma1, color=color.yellow, linewidth=2, title="SMA1", linestyle = plot.linestyle_dotted)
+
+ma2_length = input.int(200, "SMA2 Length", group=group3)
+ma2 = ta.sma(close, ma2_length)
+plot(ma2, color=color.orange, linewidth=2, title="SMA2", linestyle = plot.linestyle_dotted)
+
+group4 = "Entry Settings"
+entry_max = input.int(2, "Max entries per trend", group=group4)
+min_body_perc = input.float(50, "Min entry candle body %", minval=20, maxval=95, group=group4)
+
+
+// ----------
+//  GLOBAL VARIABLES
+// ----------
+
+bool is_bear = close < open
+bool is_bull = close > open
+float atr = ta.atr(atr_length)
+int entry = na
+int exit = na
+var bool exit_taken = false
+var float atr_exit = na
+var float last_entry = na
+var float pullback = na
+var int entries_taken = 0
+var int trend = na
+
+
+// ----------
+//  EXIT / ATR FIX
+// ----------
+
+float exit_highest = ta.highest(high, exit_bars)[1]
+float exit_lowest = ta.lowest(low, exit_bars)[1]
+
+if entries_taken > 0
+    if trend == 1 and (close < exit_lowest or close < atr_exit)
+        exit := 1
+
+    else if trend == 2 and (close > exit_highest or close > atr_exit)
+        exit := 2
+
+    if not na(exit)
+        entries_taken := 0
+        pullback := na
+        trend := na
+
+
+// ----------
+//  ENTRY
+// ----------
+
+float entry_highest = ta.highest(high, entry_bars)[1]
+float entry_lowest = ta.lowest(low, entry_bars)[1]
+
+if entry_max > entries_taken
+    float body_size = math.abs(close - open)
+    float candle_size = math.abs(high - low)
+
+    bool body = body_size / candle_size >= min_body_perc / 100 and body_size >= atr * 0.5 and candle_size < atr * 3.5
+
+    if entries_taken == 0
+        if body and close > entry_highest
+            entry := 1
+            trend := 1
+
+        else if body and close < entry_lowest
+            entry := 2
+            trend := 2
+
+    else if na(pullback)
+        if trend == 1 and is_bear
+            pullback := high
+
+        else if trend == 2 and is_bull
+            pullback := low
+
+    else if body and ((trend == 1 and close > pullback and close > last_entry) or (trend == 2 and close < pullback and close < last_entry))
+        entry := trend
+
+    if not na(entry)
+        float atr_buffer = atr * atr_add_m
+        float atr_sl_size = atr_exit_m * atr
+        atr_exit := trend == 1 ? close - atr_sl_size : close + atr_sl_size
+        entries_taken := entries_taken + 1
+        last_entry := trend == 1 ? close + atr_buffer : close - atr_buffer
+
+        if not na(exit)
+            exit := na
+
+
+// ----------
+//  VISUAL
+// ----------
+
+entry_color = color.new(color.white, 30)
+plot_size = size.tiny
+plot_bull = location.belowbar
+plot_bear = location.abovebar
+
+plotshape(entry == 1 and entries_taken == 1, title="Turtle Long", style=shape.triangleup, location=plot_bull, color=entry_color, size=plot_size)
+plotshape(entry == 2 and entries_taken == 1, title="Turtle Short", style=shape.triangledown, location=plot_bear, color=entry_color, size=plot_size)
+
+plot_style = shape.cross
+
+plotshape(entry == 1 and entries_taken > 1, title="Long Add", style=plot_style, location=plot_bull, color=entry_color, size=plot_size)
+plotshape(entry == 2 and entries_taken > 1, title="Short Add", style=plot_style, location=plot_bear, color=entry_color, size=plot_size)
+
+plot_style := shape.xcross
+plot_color = color.new(color.gray, 20)
+
+plotshape(exit == 1, title="Long Exit", style=plot_style, location=plot_bull, color=plot_color, size=plot_size)
+plotshape(exit == 2, title="Short Exit", style=plot_style, location=plot_bear, color=plot_color, size=plot_size)
+
+
+// ----------
+//  ALERTS
+// ----------
+
+bool alert_check = not na(entry)
+alertcondition(alert_check, title="All entries", message="New signal detected. Confirm the direction of the next candle before entering. Happy trading!")
+alertcondition(alert_check and entries_taken == 1, title="New Trend", message="New trend detected. Happy trading!")
+alertcondition(alert_check and entries_taken > 1, title="Add More", message="It might be good time to add to your winner. Happy trading!")
+alertcondition(not na(exit), title="Cash Out", message="It might be a good time to close your position now.")
+
+
+// ----------
+//  DAILY LEVELS
+// ----------
+
+[pdh, pdl, today_open, day_start] = request.security(syminfo.tickerid, "D", [high, low, open, time], lookahead=barmerge.lookahead_off)
+pmi = (pdh + pdl) / 2
+
+bool is_ltf = timeframe.in_seconds() <= 14400
+bool new_day = ta.change(day_start) != 0 and is_ltf
+int future_bar = time + 5 * (time - time[1])
+
+
+// ----------
+//  DAILY LEVEL LINES
+// ----------
+
+var label middle_label = na
+var label open_label = na
+var label pdh_label = na
+var label pdl_label = na
+var line middle_line = na
+var line open_line = na
+var line pdh_line = na
+var line pdl_line = na
+
+if new_day
+
+    prev_down = pdl[1]
+    prev_up = pdh[1]
+    prev_middle = (prev_up + prev_down) / 2
+
+    label.delete(middle_label)
+    label.delete(open_label)
+    label.delete(pdh_label)
+    label.delete(pdl_label)
+    line.delete(middle_line)
+    line.delete(open_line)
+    line.delete(pdh_line)
+    line.delete(pdl_line)
+
+    line_style = line.style_dashed
+
+    pdh_line := line.new(day_start, prev_up, future_bar, prev_up,
+        xloc = xloc.bar_time,
+        color = color.red,
+        style = line_style)
+
+    pdl_line := line.new(day_start, prev_down, future_bar, prev_down,
+        xloc = xloc.bar_time,
+        color = color.green,
+        style = line_style)
+
+    open_line := line.new(day_start, today_open, future_bar, today_open,
+        xloc = xloc.bar_time,
+        color = color.new(color.white, 20),
+        style = line_style)
+
+    middle_line := line.new(day_start, prev_middle, future_bar, prev_middle,
+        xloc = xloc.bar_time,
+        color = color.gray,
+        style = line_style)
+
+    pdh_label := label.new(future_bar, prev_up, "PDH",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.red,
+        color = color.new(color.red, 100))
+
+    pdl_label := label.new(future_bar, prev_down, "PDL",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.green,
+        color = color.new(color.green, 100))
+
+    open_label := label.new(future_bar, today_open, "OPEN",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.new(color.white, 20),
+        color = color.new(color.white, 100))
+
+    middle_label := label.new(future_bar, prev_middle, "MID",
+        xloc = xloc.bar_time,
+        style = label.style_label_left,
+        textcolor = color.gray,
+        color = color.new(color.gray, 100))
+
+
+// ----------
+//  BIAS TABLE
+// ----------
+
+// Inputs
+group_bias="Trend Table"
+sma_len = input.int(20, "SMA Length", minval=1, group=group_bias)
+c_bull = input.color(color.new(#26a69a, 0), "Bull", group=group_bias)
+c_bear = input.color(color.new(#ef5350, 0), "Bear", group=group_bias)
+c_neutral = input.color(color.new(#787b86, 0), "Neutral", group=group_bias)
+
+// HTF data (NOW includes open instead of prev high/low)
+get_htf(tf) =>
+    sma_val = ta.sma(close, sma_len)
+    request.security(syminfo.tickerid, tf, [close, open, sma_val], lookahead=barmerge.lookahead_on)
+
+[c_4h, o_4h, sma_4h] = get_htf("240")
+[c_d, o_d, sma_d] = get_htf("1D")
+[c_w, o_w, sma_w] = get_htf("1W")
+
+// Simplified Bias Logic
+get_bias(c, o, sma) =>
+    if c > sma and c > o
+        1
+    else if c < sma and c < o
+        -1
+    else
+        0
+
+bias_4h = get_bias(c_4h, o_4h, sma_4h)
+bias_d = get_bias(c_d, o_d, sma_d)
+bias_w = get_bias(c_w, o_w, sma_w)
+
+// Chart TF helpers
+chart_mins = timeframe.in_seconds() / 60
+is_below_4h = chart_mins <= 240
+is_below_d = chart_mins <= 1440
+
+// Table helpers
+bias_label(b) =>
+    b == 1 ? "▲ Long" : b == -1 ? "▼ Short" : "● Neutral"
+
+bias_color(b) =>
+    b == 1 ? c_bull : b == -1 ? c_bear : c_neutral
+
+hdr_bg = color.new(#1e222d, 0)
+hdr_txt = color.new(#d1d4dc, 0)
+
+// Horizontal layout
+col_count = 1 + (is_below_d ? 1 : 0) + (is_below_4h ? 1 : 0)
+
+var table tbl = table.new(
+     position.bottom_left, 5, 2,
+     bgcolor=color.new(#1e222d, 10),
+     border_width=1,
+     border_color=color.new(#363a45, 0),
+     frame_width=1,
+     frame_color=color.new(#363a45, 0))
+
+cell(col, row, txt, txt_color, bg) =>
+    table.cell(tbl, col, row, txt, text_color=txt_color, bgcolor=bg, text_size=size.normal, text_halign=text.align_center, width=4)
+
+if barstate.islast
+    col = 0
+
+    // Weekly — always visible
+    cell(col, 0, "Weekly", hdr_txt, hdr_bg)
+    cell(col, 1, bias_label(bias_w), hdr_txt, color.new(bias_color(bias_w), 50))
+    col := col + 1
+
+    if is_below_d
+        cell(col, 0, "Daily", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_d), hdr_txt, color.new(bias_color(bias_d), 50))
+        col := col + 1
+
+    if is_below_4h
+        cell(col, 0, "4H", hdr_txt, hdr_bg)
+        cell(col, 1, bias_label(bias_4h), hdr_txt, color.new(bias_color(bias_4h), 50))
+        col := col + 1
